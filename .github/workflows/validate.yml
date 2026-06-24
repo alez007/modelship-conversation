@@ -23,3 +23,8 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+          # These are HACS *default-store inclusion* checks, not requirements for
+          # installing via a custom repository (how this integration is used).
+          # Drop this ignore list (and add a description, topics, and brand assets)
+          # only if you ever submit to the HACS default store.
+          ignore: "brands topics description"
