@@ -23,6 +23,8 @@ from homeassistant.helpers import (
     entity_registry as er,
 )
 
+from .const import LOGGER
+
 # Exposure key used by the conversation platform.
 _ASSISTANT = "conversation"
 
@@ -38,6 +40,13 @@ def inject_assist_enums(hass: HomeAssistant, tools: list[dict[str, Any]]) -> Non
     code_interpreter / image tools are appended).
     """
     names, areas = _collect_exposed(hass)
+    LOGGER.debug(
+        "inject_assist_enums: %d exposed names, %d areas; names=%s areas=%s",
+        len(names),
+        len(areas),
+        names[:30],
+        areas,
+    )
     for tool in tools:
         _apply_to_tool(tool, names, areas)
 
