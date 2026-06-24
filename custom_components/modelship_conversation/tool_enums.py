@@ -82,7 +82,9 @@ def _collect_exposed(hass: HomeAssistant) -> tuple[list[str], list[str]]:
         entry = ent_reg.async_get(state.entity_id)
         if entry is None:
             continue
-        names.update(entry.aliases)
+        # aliases may contain HA's ComputedNameType singleton (means "the computed full
+        # name", already covered by state.name) alongside real string aliases.
+        names.update(alias for alias in entry.aliases if isinstance(alias, str))
         area_id = entry.area_id
         if area_id is None and entry.device_id:
             device = dev_reg.async_get(entry.device_id)
@@ -95,6 +97,6 @@ def _collect_exposed(hass: HomeAssistant) -> tuple[list[str], list[str]]:
         area = area_reg.async_get_area(area_id)
         if area:
             areas.add(area.name)
-            areas.update(area.aliases)
+            areas.update(alias for alias in area.aliases if isinstance(alias, str))
 
     return sorted(n for n in names if n), sorted(a for a in areas if a)
