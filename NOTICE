@@ -1,0 +1,18 @@
+Modelship Conversation
+Copyright 2026 Alex M
+
+This product is a fork of the Home Assistant Core "OpenAI Conversation"
+integration (homeassistant/components/openai_conversation), which is licensed
+under the Apache License, Version 2.0.
+
+  Upstream:   https://github.com/home-assistant/core
+  Path:       homeassistant/components/openai_conversation
+  Merge base: tag 2026.6.4
+
+The fork retargets the integration at a local Modelship server (an
+OpenAI-compatible API, including the /v1/responses adapter) by adding a
+configurable base URL and making the API key optional. To re-sync against a
+newer upstream, copy a fresh copy of the component from the pinned tag above
+and re-apply the delta set documented in README.md, then bump the merge base.
+
+Portions Copyright the Home Assistant authors.
