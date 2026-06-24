@@ -70,10 +70,13 @@ def _apply_to_tool(
         if isinstance(required, list) and prop in required:
             required.remove(prop)
 
+    # Copy-on-write, not in-place: HA's converted intent schemas reuse one shared dict
+    # object for several slots (e.g. HassTurnOn's `name` and `area` are the *same* dict),
+    # so `props["name"]["enum"] = ...` would also overwrite `area`'s enum (last write wins).
     if names and isinstance(props.get("name"), dict):
-        props["name"]["enum"] = names
+        props["name"] = {**props["name"], "enum": names}
     if areas and isinstance(props.get("area"), dict):
-        props["area"]["enum"] = areas
+        props["area"] = {**props["area"], "enum": areas}
 
 
 def _collect_exposed(hass: HomeAssistant) -> tuple[list[str], list[str]]:
