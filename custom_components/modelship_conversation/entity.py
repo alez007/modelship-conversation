@@ -561,6 +561,10 @@ class OpenAIBaseLLMEntity(Entity):
                 _format_tool(tool, chat_log.llm_api.custom_serializer)
                 for tool in chat_log.llm_api.tools
             ]
+            # modelship: constrain device-tool name/area to exact exposed values (variant B)
+            from .tool_enums import inject_assist_enums
+
+            inject_assist_enums(self.hass, tools)
 
         remove_citations = False
         if options.get(CONF_WEB_SEARCH):
