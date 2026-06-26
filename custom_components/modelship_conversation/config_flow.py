@@ -53,6 +53,7 @@ from .const import (
     CONF_NARROW_TOOLS,
     CONF_REASONING_EFFORT,
     CONF_REASONING_SUMMARY,
+    CONF_STOP_AFTER_ACTION,
     CONF_RECOMMENDED,
     CONF_SERVICE_TIER,
     CONF_STORE_RESPONSES,
@@ -84,6 +85,7 @@ from .const import (
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_NARROW_TOOLS,
     RECOMMENDED_REASONING_EFFORT,
+    RECOMMENDED_STOP_AFTER_ACTION,
     RECOMMENDED_REASONING_SUMMARY,
     RECOMMENDED_SERVICE_TIER,
     RECOMMENDED_STORE_RESPONSES,
@@ -417,6 +419,10 @@ class OpenAISubentryFlowHandler(ConfigSubentryFlow):
                 vol.Optional(
                     CONF_NARROW_TOOLS,
                     default=RECOMMENDED_NARROW_TOOLS,
+                ): bool,
+                vol.Optional(
+                    CONF_STOP_AFTER_ACTION,
+                    default=RECOMMENDED_STOP_AFTER_ACTION,
                 ): bool,
             }
         )

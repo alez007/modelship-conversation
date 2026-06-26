@@ -78,6 +78,7 @@ from .const import (
     CONF_REASONING_EFFORT,
     CONF_REASONING_SUMMARY,
     CONF_SERVICE_TIER,
+    CONF_STOP_AFTER_ACTION,
     CONF_STORE_RESPONSES,
     CONF_TEMPERATURE,
     CONF_TOP_P,
@@ -100,6 +101,7 @@ from .const import (
     RECOMMENDED_REASONING_EFFORT,
     RECOMMENDED_REASONING_SUMMARY,
     RECOMMENDED_SERVICE_TIER,
+    RECOMMENDED_STOP_AFTER_ACTION,
     RECOMMENDED_STORE_RESPONSES,
     RECOMMENDED_STT_MODEL,
     RECOMMENDED_TEMPERATURE,
@@ -185,6 +187,36 @@ def _latest_user_text(chat_log: conversation.ChatLog) -> str:
             if isinstance(text, str) and text:
                 return text
     return ""
+
+
+def _completed_action_speech(
+    contents: Iterable[conversation.Content],
+) -> str | None:
+    """If a control intent just completed successfully, return its confirmation speech.
+
+    Small local models keep emitting tool calls after a successful action instead of
+    ending the turn with text — burning iterations and polluting the next turn's
+    history (see the FunctionGemma findings). When ``stop_after_action`` is on, the
+    caller uses this to end the turn as soon as an action lands. Returns ``None`` for
+    query results (e.g. ``GetLiveContext``) so multi-step "check then act" flows still
+    round-trip back to the model.
+    """
+    for content in contents:
+        if not isinstance(content, conversation.ToolResultContent):
+            continue
+        result = content.tool_result
+        if not isinstance(result, dict) or result.get("response_type") != "action_done":
+            continue
+        data = result.get("data") or {}
+        if not data.get("success") or data.get("failed"):
+            continue
+        speech = result.get("speech")
+        if isinstance(speech, dict):
+            plain = speech.get("plain")
+            if isinstance(plain, dict) and plain.get("speech"):
+                return str(plain["speech"])
+        return "Done."
+    return None
 
 
 def _convert_content_to_param(
@@ -699,11 +731,8 @@ class OpenAIBaseLLMEntity(Entity):
                     self.entity_id,
                     _transform_stream(chat_log, stream, remove_citations),
                 )
-                messages.extend(
-                    _convert_content_to_param(
-                        [content async for content in content_stream]
-                    )
-                )
+                new_content = [content async for content in content_stream]
+                messages.extend(_convert_content_to_param(new_content))
             except openai.RateLimitError as err:
                 if (
                     model_args["service_tier"] == "flex"
@@ -744,6 +773,21 @@ class OpenAIBaseLLMEntity(Entity):
 
             if not chat_log.unresponded_tool_results:
                 break
+
+            # modelship: with a small local model, stop as soon as a control intent
+            # completes instead of round-tripping the success back (the model would
+            # just keep emitting tool calls). End the turn with the intent's own
+            # confirmation so HA has a final assistant turn to speak. Opt-in; off by
+            # default so capable models can still chain multi-action requests.
+            if options.get(CONF_STOP_AFTER_ACTION, RECOMMENDED_STOP_AFTER_ACTION):
+                speech = _completed_action_speech(new_content)
+                if speech is not None:
+                    await chat_log.async_add_assistant_content_without_tools(
+                        conversation.AssistantContent(
+                            agent_id=self.entity_id, content=speech
+                        )
+                    )
+                    break
 
 
 async def async_prepare_files_for_prompt(
