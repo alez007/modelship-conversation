@@ -1,14 +1,10 @@
 """Unit tests for the per-utterance tool narrower (pure logic, no HA cluster needed).
 
 Run in a Home Assistant test env (the module imports ``homeassistant`` at load). The
-functions under test are pure — they take plain dicts/sets, no fixtures required.
+function under test (``_select``) is pure — it takes plain dicts/sets, no fixtures required.
 """
 
-from custom_components.modelship_conversation.tool_narrower import (
-    _keyword_domains,
-    _select,
-    _text_domains,
-)
+from custom_components.modelship_conversation.tool_narrower import _select
 
 
 def _f(name: str) -> dict:
@@ -36,7 +32,7 @@ _DMAP = {
 
 
 def _names(kept):
-    return [t["name"] for t in kept] if kept is not None else None
+    return [t["name"] for t in kept]
 
 
 def test_media_keeps_media_and_core_drops_noise():
@@ -52,9 +48,18 @@ def test_domain_only_signal_keeps_core_plus_domain_tool():
     assert set(_names(kept)) == {"HassTurnOn", "HassTurnOff", "GetLiveContext", "HassLightSet"}
 
 
-def test_no_concrete_match_returns_none_keep_all():
-    # only core would survive -> too weak to narrow on -> signal "keep everything"
-    assert _select(_TOOLS, set(), set(), _DMAP, 6) is None
+def test_generic_match_narrows_to_core():
+    # "turn on my sony tv": hassil matches the generic HassTurnOn (no domain slot). That IS a
+    # signal -> narrow to core only. No media tools are offered, so the model cannot mis-pick
+    # HassMediaUnpause for a power command.
+    kept = _select(_TOOLS, {"HassTurnOn"}, set(), _DMAP, 6)
+    assert _names(kept) == ["HassTurnOn", "HassTurnOff", "GetLiveContext"]
+
+
+def test_no_signal_strips_all_action_tools():
+    # hassil matched nothing (greeting / chit-chat / broken hassil) -> fail closed: every
+    # action tool is stripped so a tiny model can't hallucinate a call on "hi".
+    assert _select(_TOOLS, set(), set(), _DMAP, 6) == []
 
 
 def test_cap_keeps_core_first_then_matched():
@@ -88,19 +93,7 @@ def test_non_function_tool_always_preserved_and_exempt_from_cap():
     assert extra in kept
 
 
-def test_text_domains_from_literal_exposed_name():
-    name_domains = {"small_bedroom_light": {"light"}, "sony tv": {"media_player"}}
-    area_domains = {"Living Room": {"light", "media_player"}}
-    assert _text_domains("turn off the small_bedroom_light", name_domains, area_domains) == {"light"}
-    assert _text_domains("whats on in the Living Room", name_domains, area_domains) == {
-        "light", "media_player",
-    }
-    # short names (<3 chars) ignored to avoid spurious substring hits
-    assert _text_domains("watch tv now", {"tv": {"media_player"}}, {}) == set()
-
-
-def test_keyword_backstop():
-    assert _keyword_domains("dim the lamp") == {"light"}
-    assert _keyword_domains("skip the track") == {"media_player"}
-    assert _keyword_domains("whats the temperature outside") == {"climate"}
-    assert _keyword_domains("hello there how are you") == set()
+def test_non_function_tool_survives_no_signal_strip():
+    # even when all action tools are stripped, passthrough (web_search, ...) is preserved.
+    extra = {"type": "web_search"}
+    assert _select([*_TOOLS, extra], set(), set(), _DMAP, 6) == [extra]

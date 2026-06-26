@@ -1,4 +1,4 @@
-"""Narrow the Assist tool list to the domains an utterance plausibly targets.
+"""Narrow the Assist tool list to what an utterance actually asks for.
 
 modelship-specific addition (not in upstream ``openai_conversation``). Small local models
 (e.g. FunctionGemma-270M) degrade sharply as the tool count grows: selection accuracy
@@ -7,21 +7,28 @@ extra tools don't semantically overlap — it's an attention/capacity limit, not
 ambiguity. So before the tools reach the model we trim them to the ones relevant to *this*
 utterance.
 
-The relevance signal is layered, strongest first, and every layer is fail-soft:
+**hassil is the only relevance signal.** ``_recognize_hassil`` runs Home Assistant's own
+curated sentence templates (``home_assistant_intents``) over the utterance with a *lenient*
+``recognize_all(allow_unmatched_entities=True)`` pass — more permissive than the strict
+pipeline pass that already failed (or the LLM wouldn't be involved). It returns the matched
+intents (and any domain slots they filled); a matched ``HassLightSet`` contributes
+``light``, etc. We deliberately do **not** add invented backstops (literal-substring name
+matching, keyword tables): hassil already parses the exact same exposed names as real
+grammar slots, so anything a substring loop could catch hassil catches better — and the only
+case it *wouldn't* (a bare name with no recognizable intent) is precisely the low-confidence
+case we'd rather not act on.
 
-1. **hassil + home_assistant_intents** — Home Assistant's own curated sentence templates.
-   A *lenient* recognize pass (``allow_unmatched_entities=True``) recovers the intent (and
-   for domain-specific intents, the domain) even when the strict pipeline pass failed on a
-   fuzzy entity name — which is *why* the request reached the LLM at all. Matched intents
-   name tools to keep directly; ``HassLightSet`` -> ``light`` etc. contribute domains.
-2. **Exposed entity/area names mentioned literally** — reuses tool_enums' exposed-name ->
-   domain map; if the utterance contains an exposed name we know its domain for certain.
-3. **A small keyword -> domain backstop** for when 1 and 2 yield nothing.
+Kept tools depend on the signal:
 
-Kept tools = an always-on core (``HassTurnOn``/``HassTurnOff``/``GetLiveContext``) + tools
-whose intent matched or whose target domain was detected, capped at ``max_tools``. If *no*
-signal is found, the full list is kept (today's behavior): narrowing can only match or beat
-the un-narrowed baseline, never strip a valid tool on a total miss.
+* **hassil matched something** -> an always-on core (``HassTurnOn``/``HassTurnOff``/
+  ``GetLiveContext``) + tools whose intent matched or whose target domain was detected,
+  capped at ``max_tools``.
+* **hassil matched nothing** -> strip *all* action tools. A blank match means the utterance
+  isn't a recognized device command (a greeting, chit-chat, a general question), and handing
+  a tiny model the full catalog on "hi" just invites a hallucinated call. We fail **closed**,
+  and loud: if hassil itself is broken (import/version drift), *every* request lands here and
+  the breakage is immediately obvious — far louder, and easier to catch, than a model that
+  silently picks wrong some of the time.
 
 Off by default and opt-in per subentry (``CONF_NARROW_TOOLS``): narrowing helps a tiny local
 model but would hurt a large model that handles the full catalog fine. Self-contained like
@@ -31,7 +38,6 @@ model but would hurt a large model that handles the full catalog fine. Self-cont
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -39,34 +45,10 @@ from homeassistant.core import HomeAssistant
 from .const import LOGGER
 from .tool_enums import _collect_exposed, _intent_domain_map
 
-# Tools kept regardless of detected domain: the generic on/off verbs and the live-state
-# query tool. Status questions route to GetLiveContext, so keeping it core is the whole
-# "query rule" — hassil tags "is the light on?" as a query intent, but even if it whiffs,
-# GetLiveContext stays available.
+# Tools kept whenever there is *any* hassil signal: the generic on/off verbs and the
+# live-state query tool. Status questions route to GetLiveContext, so keeping it core is the
+# whole "query rule". (On a *blank* match these are dropped too — see module docstring.)
 _CORE_TOOLS = frozenset({"HassTurnOn", "HassTurnOff", "GetLiveContext"})
-
-# Backstop ONLY — primary signal is hassil (layer 1) + exposed names (layer 2). Maps an
-# entity domain to trigger words that imply it. Deliberately small; HA's templates do the
-# real work when available.
-_KEYWORD_DOMAINS: dict[str, frozenset[str]] = {
-    "light": frozenset({"light", "lights", "lamp", "lamps", "dimmer", "brightness", "bulb"}),
-    "media_player": frozenset(
-        {"tv", "television", "music", "song", "track", "volume", "play", "playing",
-         "pause", "resume", "movie", "speaker", "media", "radio", "podcast"}
-    ),
-    "cover": frozenset(
-        {"cover", "covers", "blind", "blinds", "curtain", "curtains", "shade", "shades",
-         "garage", "shutter", "shutters"}
-    ),
-    "climate": frozenset(
-        {"temperature", "thermostat", "heating", "cooling", "heat", "warmer", "cooler",
-         "degrees", "ac"}
-    ),
-    "fan": frozenset({"fan", "fans"}),
-    "lock": frozenset({"lock", "unlock", "locked", "unlocked"}),
-    "vacuum": frozenset({"vacuum", "hoover", "roomba"}),
-    "weather": frozenset({"weather", "forecast", "rain", "raining", "sunny"}),
-}
 
 # Built once per language (the intent templates are language-global, not hass-specific).
 # ``None`` is cached too so a failed/unavailable load isn't retried every request.
@@ -79,34 +61,30 @@ def narrow_tools(
     user_text: str,
     max_tools: int = 6,
 ) -> None:
-    """Trim ``tools`` in place to those relevant to ``user_text``.
+    """Trim ``tools`` in place to what ``user_text`` asks for.
 
     ``tools`` must contain only the Assist LLM API tools (call after
     :func:`.tool_enums.inject_assist_enums`, before web_search / code_interpreter / image
-    tools are appended). Fail-soft throughout: any failure leaves the full list untouched.
+    tools are appended). A blank hassil match strips all action tools (fail closed); only an
+    error building the exposed maps / intent registry leaves the list untouched.
     """
     if not user_text or not tools:
         return
     try:
         name_domains, area_domains = _collect_exposed(hass)
         domain_map = _intent_domain_map(hass)
-        matched_intents, domains = _detect(
-            hass, user_text, name_domains, area_domains, domain_map
-        )
-    except Exception:  # narrowing must never break a request
+        # Prune the intent->domain map to domains this house actually owns: an intent whose
+        # target domain isn't installed (HassVacuumStart with no vacuum) can never be a real
+        # hit, so it must never reach the ``domain_hit`` bucket. Pure inventory fact.
+        exposed_domains = set().union(*name_domains.values(), *area_domains.values())
+        domain_map = {i: d for i, d in domain_map.items() if d & exposed_domains}
+        matched_intents, domains = _detect(hass, user_text, name_domains, area_domains, domain_map)
+    except Exception:  # only a registry/exposed-map error fails open; hassil whiffs do not
         LOGGER.debug("narrow_tools: detection failed, keeping full list", exc_info=True)
         return
 
-    if not matched_intents and not domains:
-        LOGGER.debug(
-            "narrow_tools: no signal for %r, keeping full list (%d tools)",
-            user_text,
-            len(tools),
-        )
-        return
-
     kept = _select(tools, matched_intents, domains, domain_map, max_tools)
-    if kept is None or len(kept) >= len(tools):
+    if len(kept) >= len(tools):
         return
     LOGGER.debug(
         "narrow_tools: %r -> intents=%s domains=%s; %d -> %d tools %s",
@@ -127,16 +105,13 @@ def _detect(
     area_domains: dict[str, set[str]],
     domain_map: dict[str, set[str]],
 ) -> tuple[set[str], set[str]]:
-    """Return (matched intent names, detected domains) for ``text``, layered and fail-soft."""
+    """Return (matched intent names, detected domains) for ``text`` — hassil only."""
     matched_intents, slot_domains = _recognize_hassil(
         hass, text, list(name_domains), list(area_domains)
     )
     domains: set[str] = set(slot_domains)
     for name in matched_intents:
         domains |= domain_map.get(name, set())  # HassLightSet -> {"light"}, etc.
-    domains |= _text_domains(text, name_domains, area_domains)
-    if not domains:
-        domains |= _keyword_domains(text)
     return matched_intents, domains
 
 
@@ -151,6 +126,9 @@ def _recognize_hassil(
     ``allow_unmatched_entities`` makes this *more* permissive than the pipeline's strict
     pass (which already failed, or the LLM wouldn't be involved): "turn on the tv lights"
     matches the ``HassTurnOn`` template even when "tv lights" isn't a resolvable slot.
+
+    A ``(set(), set())`` return (hassil unavailable, or genuinely no match) is treated by the
+    caller as "no device command" and fails closed — see the module docstring.
     """
     try:
         from hassil.intents import TextSlotList
@@ -205,39 +183,19 @@ def _cached_intents(lang: str) -> Any:
     return intents
 
 
-def _text_domains(
-    text: str,
-    name_domains: dict[str, set[str]],
-    area_domains: dict[str, set[str]],
-) -> set[str]:
-    """Domains of any exposed entity/area name that appears literally in ``text``."""
-    low = text.lower()
-    out: set[str] = set()
-    for mapping in (name_domains, area_domains):
-        for nm, doms in mapping.items():
-            if nm and len(nm) >= 3 and nm.lower() in low:
-                out |= doms
-    return out
-
-
-def _keyword_domains(text: str) -> set[str]:
-    """Backstop: map utterance tokens to domains via the small keyword table."""
-    tokens = set(re.findall(r"[a-z]+", text.lower()))
-    return {domain for domain, words in _KEYWORD_DOMAINS.items() if tokens & words}
-
-
 def _select(
     tools: list[dict[str, Any]],
     matched_intents: set[str],
     domains: set[str],
     domain_map: dict[str, set[str]],
     max_tools: int,
-) -> list[dict[str, Any]] | None:
+) -> list[dict[str, Any]]:
     """Pure tool-filtering — unit-testable without Home Assistant.
 
-    Returns the kept tools, or ``None`` to signal "keep everything" (nothing matched).
-    Non-function tools are always kept. Core is kept first and never evicted; on overflow
-    the remaining budget goes to matched intents, then domain hits.
+    Returns the kept tools. Non-function tools (web_search, ...) are always preserved. With a
+    hassil signal: core (kept first, never evicted) + matched intents + domain hits, capped.
+    With *no* signal (``matched_intents`` and ``domains`` both empty): only the non-function
+    passthrough survives — all action tools are stripped (fail closed; see module docstring).
     """
     passthrough: list[dict[str, Any]] = []  # non-function tools (web_search, ...) — never dropped
     core: list[dict[str, Any]] = []
@@ -254,16 +212,14 @@ def _select(
             matched.append(tool)
         elif domain_map.get(name, set()) & domains:
             domain_hit.append(tool)
-    # No concrete tool matched (only the generic core would survive) -> too weak a signal
-    # to narrow on; keep everything (fail-open) rather than strip to core.
-    if not matched and not domain_hit:
-        return None
+    # No hassil signal -> not a recognized device command -> strip every action tool.
+    if not matched_intents and not domains:
+        return passthrough
     fns = core + matched + domain_hit
     if len(fns) > max_tools:
-        # Core stays FIRST and is never evicted: it's a static list, so serializing it
-        # ahead of the per-utterance tools keeps llama.cpp's prefix cache warm through
-        # the developer prompt + core (a variable tool first would bust the cache right
-        # after the prompt). Dropping core also stranded "turn on X" with no HassTurnOn.
+        # Core stays FIRST and is never evicted: it's a static list, so serializing it ahead
+        # of the per-utterance tools keeps llama.cpp's prefix cache warm through the developer
+        # prompt + core (a variable tool first would bust the cache right after the prompt).
         # Remaining budget: matched intents first, then domain hits.
         fns = core + (matched + domain_hit)[: max(0, max_tools - len(core))]
     return passthrough + fns
