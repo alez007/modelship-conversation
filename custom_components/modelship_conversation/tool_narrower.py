@@ -236,7 +236,8 @@ def _select(
     """Pure tool-filtering — unit-testable without Home Assistant.
 
     Returns the kept tools, or ``None`` to signal "keep everything" (nothing matched).
-    Non-function tools are always kept. On overflow, priority is matched > domain > core.
+    Non-function tools are always kept. Core is kept first and never evicted; on overflow
+    the remaining budget goes to matched intents, then domain hits.
     """
     passthrough: list[dict[str, Any]] = []  # non-function tools (web_search, ...) — never dropped
     core: list[dict[str, Any]] = []
@@ -259,6 +260,10 @@ def _select(
         return None
     fns = core + matched + domain_hit
     if len(fns) > max_tools:
-        # priority on overflow: matched intents > domain hits > generic core.
-        fns = (matched + domain_hit + core)[:max_tools]
+        # Core stays FIRST and is never evicted: it's a static list, so serializing it
+        # ahead of the per-utterance tools keeps llama.cpp's prefix cache warm through
+        # the developer prompt + core (a variable tool first would bust the cache right
+        # after the prompt). Dropping core also stranded "turn on X" with no HassTurnOn.
+        # Remaining budget: matched intents first, then domain hits.
+        fns = core + (matched + domain_hit)[: max(0, max_tools - len(core))]
     return passthrough + fns

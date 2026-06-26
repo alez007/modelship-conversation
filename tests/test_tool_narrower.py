@@ -57,14 +57,29 @@ def test_no_concrete_match_returns_none_keep_all():
     assert _select(_TOOLS, set(), set(), _DMAP, 6) is None
 
 
-def test_cap_prioritises_matched_then_domain():
+def test_cap_keeps_core_first_then_matched():
     tools = [_f("HassTurnOn"), _f("HassTurnOff"), _f("GetLiveContext")] + [
         _f(f"X{i}") for i in range(5)
     ]
     dmap = {f"X{i}": {"media_player"} for i in range(5)}
     kept = _select(tools, {"X0"}, {"media_player"}, dmap, 4)
     assert len(kept) == 4
-    assert "X0" in _names(kept)  # matched intent survives the cap
+    names = _names(kept)
+    # all 3 core tools survive the cap (never evicted) and come first
+    assert names[:3] == ["HassTurnOn", "HassTurnOff", "GetLiveContext"]
+    assert "X0" in names  # matched intent takes the one remaining slot
+
+
+def test_cap_never_evicts_core_even_when_full():
+    # many matched intents must not push the static core out (the bug: HassTurnOn
+    # vanished for "turn on the tv" because 5 media intents filled the cap).
+    tools = [_f("HassTurnOn"), _f("HassTurnOff"), _f("GetLiveContext")] + [
+        _f(f"M{i}") for i in range(5)
+    ]
+    matched = {f"M{i}" for i in range(5)}
+    kept = _names(_select(tools, matched, set(), {}, 6))
+    assert {"HassTurnOn", "HassTurnOff", "GetLiveContext"}.issubset(kept)
+    assert kept[:3] == ["HassTurnOn", "HassTurnOff", "GetLiveContext"]
 
 
 def test_non_function_tool_always_preserved_and_exempt_from_cap():
