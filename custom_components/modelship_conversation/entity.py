@@ -73,6 +73,8 @@ from .const import (
     CONF_CODE_INTERPRETER,
     CONF_IMAGE_MODEL,
     CONF_MAX_TOKENS,
+    CONF_NARROW_MAX_TOOLS,
+    CONF_NARROW_TOOLS,
     CONF_REASONING_EFFORT,
     CONF_REASONING_SUMMARY,
     CONF_SERVICE_TIER,
@@ -93,6 +95,8 @@ from .const import (
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_IMAGE_MODEL,
     RECOMMENDED_MAX_TOKENS,
+    RECOMMENDED_NARROW_MAX_TOOLS,
+    RECOMMENDED_NARROW_TOOLS,
     RECOMMENDED_REASONING_EFFORT,
     RECOMMENDED_REASONING_SUMMARY,
     RECOMMENDED_SERVICE_TIER,
@@ -171,6 +175,16 @@ def _format_tool(
         description=tool.description,
         strict=False,
     )
+
+
+def _latest_user_text(chat_log: conversation.ChatLog) -> str:
+    """Return the most recent user-turn text from the chat log (for tool narrowing)."""
+    for content in reversed(chat_log.content):
+        if getattr(content, "role", None) == "user":
+            text = getattr(content, "content", None)
+            if isinstance(text, str) and text:
+                return text
+    return ""
 
 
 def _convert_content_to_param(
@@ -565,6 +579,18 @@ class OpenAIBaseLLMEntity(Entity):
             from .tool_enums import inject_assist_enums
 
             inject_assist_enums(self.hass, tools)
+
+            # modelship: trim the tool list to the utterance's likely domains for small local
+            # models (opt-in; would hurt large models that handle the full catalog).
+            if options.get(CONF_NARROW_TOOLS, RECOMMENDED_NARROW_TOOLS):
+                from .tool_narrower import narrow_tools
+
+                narrow_tools(
+                    self.hass,
+                    tools,
+                    _latest_user_text(chat_log),
+                    options.get(CONF_NARROW_MAX_TOOLS, RECOMMENDED_NARROW_MAX_TOOLS),
+                )
 
         remove_citations = False
         if options.get(CONF_WEB_SEARCH):

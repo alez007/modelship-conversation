@@ -139,6 +139,7 @@
           "data": {
             "code_interpreter": "Enable code interpreter tool",
             "image_model": "Image generation model",
+            "narrow_tools": "Narrow tools for small models",
             "inline_citations": "Include links in web search results",
             "reasoning_effort": "Reasoning effort",
             "reasoning_summary": "Reasoning summary",
@@ -150,6 +151,7 @@
           "data_description": {
             "code_interpreter": "This tool, also known as the python tool to the model, allows it to run code to answer questions",
             "image_model": "The model to use when generating images",
+            "narrow_tools": "Trims the Assist tool list per request to only the domains the utterance targets (via Home Assistant intent templates). Improves selection accuracy on small local models; leave off for large models",
             "inline_citations": "If disabled, additional prompt is added to ask the model to not include source citations",
             "reasoning_effort": "How many reasoning tokens the model should generate before creating a response to the prompt",
             "reasoning_summary": "Controls the length and detail of reasoning summaries provided by the model",
