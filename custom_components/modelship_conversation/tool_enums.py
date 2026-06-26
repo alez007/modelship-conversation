@@ -40,7 +40,9 @@ from .const import LOGGER
 _ASSISTANT = "conversation"
 
 # Slots small models over-fill with garbage; dropped from every device tool. ``domain`` is
-# intentionally kept (dropping it was worse on the 0.5B — free domain array -> garbage).
+# intentionally kept (dropping it was worse on the 0.5B) but is now enum-scoped like
+# name/area below — left as a free string array, the 270M fills it with entity names
+# (e.g. domain=["forecast home", ...]) -> MatchFailedError(DOMAIN).
 _TRIM_PROPS = ("device_class", "floor")
 
 
@@ -53,6 +55,7 @@ def inject_assist_enums(hass: HomeAssistant, tools: list[dict[str, Any]]) -> Non
     name_domains, area_domains = _collect_exposed(hass)
     all_names = sorted(n for n in name_domains if n)
     all_areas = sorted(a for a in area_domains if a)
+    all_domains = sorted({d for doms in name_domains.values() for d in doms})
     domain_map = _intent_domain_map(hass)
     LOGGER.debug(
         "inject_assist_enums: %d exposed names, %d areas, %d domain-scoped intents; "
@@ -64,7 +67,9 @@ def inject_assist_enums(hass: HomeAssistant, tools: list[dict[str, Any]]) -> Non
         all_areas,
     )
     for tool in tools:
-        _apply_to_tool(tool, name_domains, all_names, area_domains, all_areas, domain_map)
+        _apply_to_tool(
+            tool, name_domains, all_names, area_domains, all_areas, all_domains, domain_map
+        )
 
 
 def _apply_to_tool(
@@ -73,6 +78,7 @@ def _apply_to_tool(
     all_names: list[str],
     area_domains: dict[str, set[str]],
     all_areas: list[str],
+    all_domains: list[str],
     domain_map: dict[str, set[str]],
 ) -> None:
     """Pure schema mutation — unit-testable without Home Assistant."""
@@ -96,6 +102,7 @@ def _apply_to_tool(
     target = domain_map.get(tool.get("name"))
     names = all_names if target is None else [n for n in all_names if name_domains[n] & target]
     areas = all_areas if target is None else [a for a in all_areas if area_domains[a] & target]
+    domains = all_domains if target is None else sorted(target)
 
     # Copy-on-write, not in-place: HA's converted intent schemas reuse one shared dict
     # object for several slots (e.g. HassTurnOn's `name` and `area` are the *same* dict),
@@ -104,6 +111,12 @@ def _apply_to_tool(
         props["name"] = {**props["name"], "enum": names}
     if areas and isinstance(props.get("area"), dict):
         props["area"] = {**props["area"], "enum": areas}
+    # ``domain`` is an array of strings; constrain its *items* to real exposed domains so
+    # the grammar can't accept hallucinated entity-names there (the emitter enforces an
+    # enum on array items). Copy-on-write at both levels for the same shared-dict reason.
+    dom = props.get("domain")
+    if domains and isinstance(dom, dict) and isinstance(dom.get("items"), dict):
+        props["domain"] = {**dom, "items": {**dom["items"], "enum": domains}}
 
 
 def _intent_domain_map(hass: HomeAssistant) -> dict[str, set[str]]:
