@@ -150,6 +150,7 @@ async def _recognize_hassil(
     caller as "no device command" and fails closed — see the module docstring.
     """
     try:
+        from hassil.errors import MissingListError
         from hassil.intents import TextSlotList
         from hassil.recognize import recognize_all
     except Exception as err:
@@ -165,11 +166,26 @@ async def _recognize_hassil(
         if area_strings:
             slot_lists["area"] = TextSlotList.from_strings(area_strings)
 
+        # Home Assistant updates occasionally add new slot lists (like {floor}) to intents.
+        # If one is missing from slot_lists, recognize_all raises MissingListError and aborts.
+        # We catch it, populate an empty list to satisfy the parser, and retry so we don't fail.
+        results = None
+        while True:
+            try:
+                results = list(
+                    recognize_all(
+                        text, intents, slot_lists=slot_lists, allow_unmatched_entities=True
+                    )
+                )
+                break
+            except MissingListError as e:
+                # e.g. "Missing slot list {floor}" -> "floor"
+                missing = str(e).split("{")[-1].split("}")[0]
+                slot_lists[missing] = TextSlotList.from_strings([])
+
         matched: set[str] = set()
         domains: set[str] = set()
-        for result in recognize_all(
-            text, intents, slot_lists=slot_lists, allow_unmatched_entities=True
-        ):
+        for result in results:
             name = getattr(getattr(result, "intent", None), "name", None)
             if isinstance(name, str):
                 matched.add(name)
