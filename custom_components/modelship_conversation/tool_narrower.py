@@ -54,6 +54,25 @@ _CORE_TOOLS = frozenset({"HassTurnOn", "HassTurnOff", "GetLiveContext"})
 # ``None`` is cached too so a failed/unavailable load isn't retried every request.
 _INTENTS_CACHE: dict[str, Any] = {}
 
+# hassil is now load-bearing: if it can't run, every request narrows to zero tools. That
+# must not be silent, but it also must not spam a warning per request — log the real cause
+# exactly once per process.
+_HASSIL_FAILED_LOGGED = False
+
+
+def _hassil_unavailable(reason: str, exc: BaseException | None = None) -> tuple[set[str], set[str]]:
+    """Log (once) why hassil couldn't run and return the empty signal."""
+    global _HASSIL_FAILED_LOGGED
+    if not _HASSIL_FAILED_LOGGED:
+        _HASSIL_FAILED_LOGGED = True
+        LOGGER.warning(
+            "narrow_tools: hassil unavailable (%s) -> every request narrows to ZERO tools "
+            "until fixed",
+            reason,
+            exc_info=exc,
+        )
+    return set(), set()
+
 
 def narrow_tools(
     hass: HomeAssistant,
@@ -133,13 +152,13 @@ def _recognize_hassil(
     try:
         from hassil.intents import TextSlotList
         from hassil.recognize import recognize_all
-    except Exception:
-        return set(), set()
+    except Exception as err:
+        return _hassil_unavailable("import failed", err)
     try:
         lang = hass.config.language or "en"
         intents = _cached_intents(lang) or _cached_intents("en")
         if intents is None:
-            return set(), set()
+            return _hassil_unavailable("could not load intents")
         slot_lists: dict[str, Any] = {}
         if name_strings:
             slot_lists["name"] = TextSlotList.from_strings(name_strings)
