@@ -102,7 +102,7 @@ async def narrow_tools(
         LOGGER.debug("narrow_tools: detection failed, keeping full list", exc_info=True)
         return
 
-    kept = _select(tools, matched_intents, domains, domain_map, max_tools)
+    kept = _select(tools, matched_intents, domains, domain_map, max_tools, name_domains, area_domains)
     if len(kept) >= len(tools):
         return
     LOGGER.debug(
@@ -230,6 +230,8 @@ def _select(
     domains: set[str],
     domain_map: dict[str, set[str]],
     max_tools: int,
+    name_domains: dict[str, set[str]],
+    area_domains: dict[str, set[str]],
 ) -> list[dict[str, Any]]:
     """Pure tool-filtering — unit-testable without Home Assistant.
 
@@ -263,4 +265,48 @@ def _select(
         # prompt + core (a variable tool first would bust the cache right after the prompt).
         # Remaining budget: matched intents first, then domain hits.
         fns = core + (matched + domain_hit)[: max(0, max_tools - len(core))]
+
+    # If hassil detected specific domains, narrow the enum lists within generic tools
+    # so HassTurnOn doesn't offer "sony tv" when asked to turn on lights.
+    if domains:
+        for tool in fns:
+            # Skip if this tool has a static target domain (tool_enums already scoped it perfectly).
+            # We only need to dynamically narrow generic tools like HassTurnOn/HassTurnOff/GetLiveContext.
+            if domain_map.get(tool.get("name")) is not None:
+                continue
+
+            params = tool.get("parameters")
+            if not isinstance(params, dict):
+                continue
+            props = params.get("properties")
+            if not isinstance(props, dict):
+                continue
+
+            # Narrow 'name' enum
+            if isinstance(props.get("name"), dict) and "enum" in props["name"]:
+                new_names = [n for n in props["name"]["enum"] if name_domains.get(n, set()) & domains]
+                if new_names:
+                    props["name"] = {**props["name"], "enum": new_names}
+                else:
+                    # If empty, remove the enum constraint entirely so the model can hallucinate
+                    # and fail gracefully rather than forcing it to pick an unrelated valid device.
+                    props["name"] = {k: v for k, v in props["name"].items() if k != "enum"}
+
+            # Narrow 'area' enum
+            if isinstance(props.get("area"), dict) and "enum" in props["area"]:
+                new_areas = [a for a in props["area"]["enum"] if area_domains.get(a, set()) & domains]
+                if new_areas:
+                    props["area"] = {**props["area"], "enum": new_areas}
+                else:
+                    props["area"] = {k: v for k, v in props["area"].items() if k != "enum"}
+
+            # Narrow 'domain' enum
+            dom = props.get("domain")
+            if isinstance(dom, dict) and isinstance(dom.get("items"), dict) and "enum" in dom["items"]:
+                new_domains = [d for d in dom["items"]["enum"] if d in domains]
+                if new_domains:
+                    props["domain"] = {**dom, "items": {**dom["items"], "enum": new_domains}}
+                else:
+                    props["domain"] = {**dom, "items": {k: v for k, v in dom["items"].items() if k != "enum"}}
+
     return passthrough + fns
