@@ -115,8 +115,21 @@ def _apply_to_tool(
     # the grammar can't accept hallucinated entity-names there (the emitter enforces an
     # enum on array items). Copy-on-write at both levels for the same shared-dict reason.
     dom = props.get("domain")
-    if domains and isinstance(dom, dict) and isinstance(dom.get("items"), dict):
-        props["domain"] = {**dom, "items": {**dom["items"], "enum": domains}}
+    if domains and isinstance(dom, dict):
+        if "anyOf" in dom and isinstance(dom["anyOf"], list):
+            new_anyof = []
+            for variant in dom["anyOf"]:
+                if not isinstance(variant, dict):
+                    new_anyof.append(variant)
+                elif variant.get("type") == "string":
+                    new_anyof.append({**variant, "enum": domains})
+                elif variant.get("type") == "array" and isinstance(variant.get("items"), dict):
+                    new_anyof.append({**variant, "items": {**variant["items"], "enum": domains}})
+                else:
+                    new_anyof.append(variant)
+            props["domain"] = {**dom, "anyOf": new_anyof}
+        elif isinstance(dom.get("items"), dict):
+            props["domain"] = {**dom, "items": {**dom["items"], "enum": domains}}
 
 
 def _intent_domain_map(hass: HomeAssistant) -> dict[str, set[str]]:

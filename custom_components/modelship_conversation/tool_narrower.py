@@ -322,16 +322,27 @@ def _select(
 
             # Narrow 'domain' enum (which might now be inside `anyOf` due to step 1)
             dom = props.get("domain")
-            if isinstance(dom, dict) and "anyOf" in dom:
-                # the anyOf array has [string_variant, array_variant]
-                arr_variant = dom["anyOf"][1]
-                if isinstance(arr_variant.get("items"), dict) and "enum" in arr_variant["items"]:
-                    new_domains = [d for d in arr_variant["items"]["enum"] if d in domains]
-                    if new_domains:
-                        dom["anyOf"][0] = {**dom["anyOf"][0], "enum": new_domains}
-                        arr_variant["items"] = {**arr_variant["items"], "enum": new_domains}
+            if isinstance(dom, dict) and "anyOf" in dom and isinstance(dom["anyOf"], list):
+                new_anyof = []
+                for variant in dom["anyOf"]:
+                    if not isinstance(variant, dict):
+                        new_anyof.append(variant)
+                        continue
+                    
+                    if variant.get("type") == "string" and "enum" in variant:
+                        new_domains = [d for d in variant["enum"] if d in domains]
+                        if new_domains:
+                            new_anyof.append({**variant, "enum": new_domains})
+                        else:
+                            new_anyof.append({k: v for k, v in variant.items() if k != "enum"})
+                    elif variant.get("type") == "array" and isinstance(variant.get("items"), dict) and "enum" in variant["items"]:
+                        new_domains = [d for d in variant["items"]["enum"] if d in domains]
+                        if new_domains:
+                            new_anyof.append({**variant, "items": {**variant["items"], "enum": new_domains}})
+                        else:
+                            new_anyof.append({**variant, "items": {k: v for k, v in variant["items"].items() if k != "enum"}})
                     else:
-                        dom["anyOf"][0] = {k: v for k, v in dom["anyOf"][0].items() if k != "enum"}
-                        arr_variant["items"] = {k: v for k, v in arr_variant["items"].items() if k != "enum"}
+                        new_anyof.append(variant)
+                props["domain"] = {**dom, "anyOf": new_anyof}
 
     return passthrough + fns
