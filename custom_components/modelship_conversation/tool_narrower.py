@@ -74,7 +74,7 @@ def _hassil_unavailable(reason: str, exc: BaseException | None = None) -> tuple[
     return set(), set()
 
 
-def narrow_tools(
+async def narrow_tools(
     hass: HomeAssistant,
     tools: list[dict[str, Any]],
     user_text: str,
@@ -97,7 +97,7 @@ def narrow_tools(
         # hit, so it must never reach the ``domain_hit`` bucket. Pure inventory fact.
         exposed_domains = set().union(*name_domains.values(), *area_domains.values())
         domain_map = {i: d for i, d in domain_map.items() if d & exposed_domains}
-        matched_intents, domains = _detect(hass, user_text, name_domains, area_domains, domain_map)
+        matched_intents, domains = await _detect(hass, user_text, name_domains, area_domains, domain_map)
     except Exception:  # only a registry/exposed-map error fails open; hassil whiffs do not
         LOGGER.debug("narrow_tools: detection failed, keeping full list", exc_info=True)
         return
@@ -117,7 +117,7 @@ def narrow_tools(
     tools[:] = kept
 
 
-def _detect(
+async def _detect(
     hass: HomeAssistant,
     text: str,
     name_domains: dict[str, set[str]],
@@ -125,7 +125,7 @@ def _detect(
     domain_map: dict[str, set[str]],
 ) -> tuple[set[str], set[str]]:
     """Return (matched intent names, detected domains) for ``text`` — hassil only."""
-    matched_intents, slot_domains = _recognize_hassil(
+    matched_intents, slot_domains = await _recognize_hassil(
         hass, text, list(name_domains), list(area_domains)
     )
     domains: set[str] = set(slot_domains)
@@ -134,7 +134,7 @@ def _detect(
     return matched_intents, domains
 
 
-def _recognize_hassil(
+async def _recognize_hassil(
     hass: HomeAssistant,
     text: str,
     name_strings: list[str],
@@ -156,7 +156,7 @@ def _recognize_hassil(
         return _hassil_unavailable("import failed", err)
     try:
         lang = hass.config.language or "en"
-        intents = _cached_intents(lang) or _cached_intents("en")
+        intents = await _cached_intents(hass, lang) or await _cached_intents(hass, "en")
         if intents is None:
             return _hassil_unavailable("could not load intents")
         slot_lists: dict[str, Any] = {}
@@ -184,20 +184,24 @@ def _recognize_hassil(
         return set(), set()
 
 
-def _cached_intents(lang: str) -> Any:
+async def _cached_intents(hass: HomeAssistant, lang: str) -> Any:
     """Load and cache the hassil ``Intents`` for a language (caches failures as ``None``)."""
     if lang in _INTENTS_CACHE:
         return _INTENTS_CACHE[lang]
-    intents: Any = None
-    try:
-        from hassil.intents import Intents
-        from home_assistant_intents import get_intents
 
-        data = get_intents(lang)
-        if data:
-            intents = Intents.from_dict(data)
-    except Exception:
-        LOGGER.debug("narrow_tools: could not load intents for %s", lang, exc_info=True)
+    def _load() -> Any:
+        try:
+            from hassil.intents import Intents
+            from home_assistant_intents import get_intents
+
+            data = get_intents(lang)
+            if data:
+                return Intents.from_dict(data)
+        except Exception:
+            LOGGER.debug("narrow_tools: could not load intents for %s", lang, exc_info=True)
+        return None
+
+    intents = await hass.async_add_executor_job(_load)
     _INTENTS_CACHE[lang] = intents
     return intents
 

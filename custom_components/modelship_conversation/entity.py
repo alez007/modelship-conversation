@@ -617,7 +617,7 @@ class OpenAIBaseLLMEntity(Entity):
             if options.get(CONF_NARROW_TOOLS, RECOMMENDED_NARROW_TOOLS):
                 from .tool_narrower import narrow_tools
 
-                narrow_tools(
+                await narrow_tools(
                     self.hass,
                     tools,
                     _latest_user_text(chat_log),
