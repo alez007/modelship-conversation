@@ -97,3 +97,178 @@ def test_non_function_tool_survives_no_signal_strip():
     # even when all action tools are stripped, passthrough (web_search, ...) is preserved.
     extra = {"type": "web_search"}
     assert _select([*_TOOLS, extra], set(), set(), _DMAP, 6, {}, {}) == [extra]
+
+
+def test_broaden_arrays_rewrites_to_anyof():
+    tools = [
+        {
+            "type": "function",
+            "name": "HassTurnOn",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["light", "switch"]}
+                    },
+                    "other_prop": {
+                        "type": "string"
+                    }
+                }
+            }
+        }
+    ]
+    kept = _select(tools, {"HassTurnOn"}, set(), {}, 6, {}, {})
+    domain_prop = kept[0]["parameters"]["properties"]["domain"]
+    assert "anyOf" in domain_prop
+    assert domain_prop["anyOf"][0] == {"type": "string", "enum": ["light", "switch"]}
+    assert domain_prop["anyOf"][1] == {"type": "array", "items": {"type": "string", "enum": ["light", "switch"]}}
+
+
+def test_narrow_generic_enums_name_area_domain():
+    tools = [
+        {
+            "type": "function",
+            "name": "HassTurnOn",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "enum": ["sony tv", "Livingroom Lamps", "small_bedroom_light"]
+                    },
+                    "area": {
+                        "type": "string",
+                        "enum": ["Living Room", "Small Bedroom"]
+                    },
+                    "domain": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["light", "media_player", "vacuum"]}
+                    }
+                }
+            }
+        }
+    ]
+    name_domains = {
+        "sony tv": {"media_player"},
+        "Livingroom Lamps": {"light"},
+        "small_bedroom_light": {"light"}
+    }
+    area_domains = {
+        "Living Room": {"light", "media_player"},
+        "Small Bedroom": {"light"}
+    }
+    
+    kept = _select(tools, {"HassTurnOn"}, {"light"}, {}, 6, name_domains, area_domains)
+    properties = kept[0]["parameters"]["properties"]
+    
+    # "sony tv" should be excluded from "name" enum because its domain is "media_player" (not "light")
+    assert set(properties["name"]["enum"]) == {"Livingroom Lamps", "small_bedroom_light"}
+    
+    # Both rooms have light, so both remain
+    assert set(properties["area"]["enum"]) == {"Living Room", "Small Bedroom"}
+    
+    # "domain" enum rewritten and narrowed
+    domain_prop = properties["domain"]
+    assert "anyOf" in domain_prop
+    assert domain_prop["anyOf"][0]["enum"] == ["light"]
+    assert domain_prop["anyOf"][1]["items"]["enum"] == ["light"]
+
+
+def test_narrow_generic_enums_removes_enum_key_if_none_match():
+    tools = [
+        {
+            "type": "function",
+            "name": "HassTurnOn",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "enum": ["sony tv"]
+                    },
+                    "area": {
+                        "type": "string",
+                        "enum": ["Small Bedroom"]
+                    },
+                    "domain": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["media_player"]}
+                    }
+                }
+            }
+        }
+    ]
+    name_domains = {"sony tv": {"media_player"}}
+    area_domains = {"Small Bedroom": {"light"}}
+    
+    # domains is {"vacuum"} — nothing matches
+    kept = _select(tools, {"HassTurnOn"}, {"vacuum"}, {}, 6, name_domains, area_domains)
+    properties = kept[0]["parameters"]["properties"]
+    
+    # enum keys should be removed entirely
+    assert "enum" not in properties["name"]
+    assert "enum" not in properties["area"]
+    
+    domain_prop = properties["domain"]
+    assert "anyOf" in domain_prop
+    assert "enum" not in domain_prop["anyOf"][0]
+    assert "enum" not in domain_prop["anyOf"][1]["items"]
+
+
+def test_nested_openai_structure_enum_narrowing_and_broadening():
+    # Simulate a nested tool as passed in production (OpenAI format)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "HassTurnOn",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "enum": ["sony tv", "Livingroom Lamps", "small_bedroom_light"]
+                        },
+                        "area": {
+                            "type": "string",
+                            "enum": ["Living Room", "Small Bedroom"]
+                        },
+                        "domain": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["light", "media_player", "vacuum"]}
+                        }
+                    }
+                }
+            }
+        }
+    ]
+    name_domains = {
+        "sony tv": {"media_player"},
+        "Livingroom Lamps": {"light"},
+        "small_bedroom_light": {"light"}
+    }
+    area_domains = {
+        "Living Room": {"light", "media_player"},
+        "Small Bedroom": {"light"}
+    }
+    
+    # Run _select with domains = {"light"}
+    kept = _select(tools, {"HassTurnOn"}, {"light"}, {}, 6, name_domains, area_domains)
+    assert len(kept) == 1
+    
+    properties = kept[0]["function"]["parameters"]["properties"]
+    
+    # "sony tv" is excluded because its domain is "media_player"
+    assert set(properties["name"]["enum"]) == {"Livingroom Lamps", "small_bedroom_light"}
+    
+    # Both rooms have light, so both remain
+    assert set(properties["area"]["enum"]) == {"Living Room", "Small Bedroom"}
+    
+    # "domain" array broadened to anyOf and narrowed to "light"
+    domain_prop = properties["domain"]
+    assert "anyOf" in domain_prop
+    assert domain_prop["anyOf"][0]["enum"] == ["light"]
+    assert domain_prop["anyOf"][1]["items"]["enum"] == ["light"]
+
+

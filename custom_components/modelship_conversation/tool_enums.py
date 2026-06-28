@@ -84,7 +84,16 @@ def _apply_to_tool(
     """Pure schema mutation — unit-testable without Home Assistant."""
     if not isinstance(tool, dict) or tool.get("type") != "function":
         return
-    params = tool.get("parameters")
+    
+    # Handle nested or flat structure
+    fn_def = tool.get("function")
+    if isinstance(fn_def, dict):
+        params = fn_def.get("parameters")
+        name = fn_def.get("name")
+    else:
+        params = tool.get("parameters")
+        name = tool.get("name")
+
     if not isinstance(params, dict):
         return
     props = params.get("properties")
@@ -99,7 +108,7 @@ def _apply_to_tool(
 
     # Target domains for this intent (None == generic -> advertise everything). Tool names
     # are the (slugified) intent_type; an unknown name degrades safely to the full enum.
-    target = domain_map.get(tool.get("name"))
+    target = domain_map.get(name)
     names = all_names if target is None else [n for n in all_names if name_domains[n] & target]
     areas = all_areas if target is None else [a for a in all_areas if area_domains[a] & target]
     domains = all_domains if target is None else sorted(target)

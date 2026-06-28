@@ -248,7 +248,14 @@ def _select(
         if not isinstance(tool, dict) or tool.get("type") != "function":
             passthrough.append(tool)
             continue
-        name = tool.get("name")
+        
+        # Handle nested or flat structure
+        fn_def = tool.get("function")
+        if isinstance(fn_def, dict):
+            name = fn_def.get("name")
+        else:
+            name = tool.get("name")
+
         if name in _CORE_TOOLS:
             core.append(tool)
         elif name in matched_intents:
@@ -272,7 +279,12 @@ def _select(
     # making it fall back to plain text hallucination. We rewrite string arrays to `anyOf`
     # [string, array] for ALL kept tools so the grammar allows both formats.
     for tool in fns:
-        params = tool.get("parameters")
+        fn_def = tool.get("function")
+        if isinstance(fn_def, dict):
+            params = fn_def.get("parameters")
+        else:
+            params = tool.get("parameters")
+
         if not isinstance(params, dict):
             continue
         props = params.get("properties")
@@ -294,10 +306,17 @@ def _select(
     # within generic tools so HassTurnOn doesn't offer "sony tv" when asked to turn on lights.
     if domains:
         for tool in fns:
-            if domain_map.get(tool.get("name")) is not None:
+            fn_def = tool.get("function")
+            if isinstance(fn_def, dict):
+                params = fn_def.get("parameters")
+                name = fn_def.get("name")
+            else:
+                params = tool.get("parameters")
+                name = tool.get("name")
+
+            if domain_map.get(name) is not None:
                 continue
 
-            params = tool.get("parameters")
             if not isinstance(params, dict):
                 continue
             props = params.get("properties")
