@@ -169,19 +169,21 @@ async def _recognize_hassil(
         # Home Assistant updates occasionally add new slot lists (like {floor}) to intents.
         # If one is missing from slot_lists, recognize_all raises MissingListError and aborts.
         # We catch it, populate an empty list to satisfy the parser, and retry so we don't fail.
-        results = None
-        while True:
-            try:
-                results = list(
-                    recognize_all(
-                        text, intents, slot_lists=slot_lists, allow_unmatched_entities=True
+        def _run_recognize() -> list[Any]:
+            while True:
+                try:
+                    return list(
+                        recognize_all(
+                            text, intents, slot_lists=slot_lists, allow_unmatched_entities=True
+                        )
                     )
-                )
-                break
-            except MissingListError as e:
-                # e.g. "Missing slot list {floor}" -> "floor"
-                missing = str(e).split("{")[-1].split("}")[0]
-                slot_lists[missing] = TextSlotList.from_strings([])
+                except MissingListError as e:
+                    # e.g. "Missing slot list {floor}" -> "floor"
+                    missing = str(e).split("{")[-1].split("}")[0]
+                    slot_lists[missing] = TextSlotList.from_strings([])
+
+        # recognize_all (via unicode_rbnf) does blocking disk reads for number parsing.
+        results = await hass.async_add_executor_job(_run_recognize)
 
         matched: set[str] = set()
         domains: set[str] = set()
