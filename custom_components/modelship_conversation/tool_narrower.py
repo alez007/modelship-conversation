@@ -266,12 +266,34 @@ def _select(
         # Remaining budget: matched intents first, then domain hits.
         fns = core + (matched + domain_hit)[: max(0, max_tools - len(core))]
 
-    # If hassil detected specific domains, narrow the enum lists within generic tools
-    # so HassTurnOn doesn't offer "sony tv" when asked to turn on lights.
+    # 1. Broaden arrays: small fine-tunes (FunctionGemma-270m) often output single strings
+    # for list parameters (like `domain:<escape>light<escape>`). HA's schemas use `type: array`,
+    # which causes the grammar compiler to strictly enforce `[` brackets and blocks the model,
+    # making it fall back to plain text hallucination. We rewrite string arrays to `anyOf`
+    # [string, array] for ALL kept tools so the grammar allows both formats.
+    for tool in fns:
+        params = tool.get("parameters")
+        if not isinstance(params, dict):
+            continue
+        props = params.get("properties")
+        if not isinstance(props, dict):
+            continue
+        for k, v in props.items():
+            if isinstance(v, dict) and v.get("type") == "array":
+                items = v.get("items")
+                if isinstance(items, dict) and items.get("type") == "string":
+                    # Rewrite to anyOf
+                    props[k] = {
+                        "anyOf": [
+                            items,  # The string variant (with or without enum)
+                            v,      # The original array variant
+                        ]
+                    }
+
+    # 2. Narrow generic enums: if hassil detected specific domains, narrow the enum lists
+    # within generic tools so HassTurnOn doesn't offer "sony tv" when asked to turn on lights.
     if domains:
         for tool in fns:
-            # Skip if this tool has a static target domain (tool_enums already scoped it perfectly).
-            # We only need to dynamically narrow generic tools like HassTurnOn/HassTurnOff/GetLiveContext.
             if domain_map.get(tool.get("name")) is not None:
                 continue
 
@@ -288,8 +310,6 @@ def _select(
                 if new_names:
                     props["name"] = {**props["name"], "enum": new_names}
                 else:
-                    # If empty, remove the enum constraint entirely so the model can hallucinate
-                    # and fail gracefully rather than forcing it to pick an unrelated valid device.
                     props["name"] = {k: v for k, v in props["name"].items() if k != "enum"}
 
             # Narrow 'area' enum
@@ -300,13 +320,18 @@ def _select(
                 else:
                     props["area"] = {k: v for k, v in props["area"].items() if k != "enum"}
 
-            # Narrow 'domain' enum
+            # Narrow 'domain' enum (which might now be inside `anyOf` due to step 1)
             dom = props.get("domain")
-            if isinstance(dom, dict) and isinstance(dom.get("items"), dict) and "enum" in dom["items"]:
-                new_domains = [d for d in dom["items"]["enum"] if d in domains]
-                if new_domains:
-                    props["domain"] = {**dom, "items": {**dom["items"], "enum": new_domains}}
-                else:
-                    props["domain"] = {**dom, "items": {k: v for k, v in dom["items"].items() if k != "enum"}}
+            if isinstance(dom, dict) and "anyOf" in dom:
+                # the anyOf array has [string_variant, array_variant]
+                arr_variant = dom["anyOf"][1]
+                if isinstance(arr_variant.get("items"), dict) and "enum" in arr_variant["items"]:
+                    new_domains = [d for d in arr_variant["items"]["enum"] if d in domains]
+                    if new_domains:
+                        dom["anyOf"][0] = {**dom["anyOf"][0], "enum": new_domains}
+                        arr_variant["items"] = {**arr_variant["items"], "enum": new_domains}
+                    else:
+                        dom["anyOf"][0] = {k: v for k, v in dom["anyOf"][0].items() if k != "enum"}
+                        arr_variant["items"] = {k: v for k, v in arr_variant["items"].items() if k != "enum"}
 
     return passthrough + fns
