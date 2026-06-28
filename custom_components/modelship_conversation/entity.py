@@ -782,7 +782,7 @@ class OpenAIBaseLLMEntity(Entity):
             if options.get(CONF_STOP_AFTER_ACTION, RECOMMENDED_STOP_AFTER_ACTION):
                 speech = _completed_action_speech(new_content)
                 if speech is not None:
-                    await chat_log.async_add_assistant_content_without_tools(
+                    chat_log.async_add_assistant_content_without_tools(
                         conversation.AssistantContent(
                             agent_id=self.entity_id, content=speech
                         )
