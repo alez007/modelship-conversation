@@ -98,6 +98,13 @@ async def narrow_tools(
         exposed_domains = set().union(*name_domains.values(), *area_domains.values())
         domain_map = {i: d for i, d in domain_map.items() if d & exposed_domains}
         matched_intents, domains = await _detect(hass, user_text, name_domains, area_domains, domain_map)
+        # Drop hassil-detected slot domains the house doesn't actually expose. hassil's
+        # lenient pass over HA's curated templates can bind a domain we can't act on
+        # (e.g. "turn off the tv" false-matching the scene/script turn-off sentences ->
+        # domains={scene, script}); left in, that false signal narrows every generic
+        # enum to the empty set in ``_select`` and the tools reach the model bare. The
+        # intent->domain map above is already pruned this way; slot domains must be too.
+        domains &= exposed_domains
     except Exception:  # only a registry/exposed-map error fails open; hassil whiffs do not
         LOGGER.debug("narrow_tools: detection failed, keeping full list", exc_info=True)
         return
@@ -323,21 +330,20 @@ def _select(
             if not isinstance(props, dict):
                 continue
 
-            # Narrow 'name' enum
+            # Narrow 'name' enum. If the filter empties (no exposed name in the detected
+            # domains), keep the full enum rather than dropping it: a bare slot lets the
+            # model hallucinate any string, which is strictly worse than an over-broad but
+            # still-valid enum. So narrowing only ever shrinks, never removes, the guardrail.
             if isinstance(props.get("name"), dict) and "enum" in props["name"]:
                 new_names = [n for n in props["name"]["enum"] if name_domains.get(n, set()) & domains]
                 if new_names:
                     props["name"] = {**props["name"], "enum": new_names}
-                else:
-                    props["name"] = {k: v for k, v in props["name"].items() if k != "enum"}
 
-            # Narrow 'area' enum
+            # Narrow 'area' enum (same keep-full-on-empty rule as 'name' above).
             if isinstance(props.get("area"), dict) and "enum" in props["area"]:
                 new_areas = [a for a in props["area"]["enum"] if area_domains.get(a, set()) & domains]
                 if new_areas:
                     props["area"] = {**props["area"], "enum": new_areas}
-                else:
-                    props["area"] = {k: v for k, v in props["area"].items() if k != "enum"}
 
             # Narrow 'domain' enum (which might now be inside `anyOf` due to step 1)
             dom = props.get("domain")
@@ -348,18 +354,20 @@ def _select(
                         new_anyof.append(variant)
                         continue
                     
+                    # As with name/area: an empty filter keeps the original (full) enum
+                    # rather than stripping it to a bare, hallucination-prone slot.
                     if variant.get("type") == "string" and "enum" in variant:
                         new_domains = [d for d in variant["enum"] if d in domains]
                         if new_domains:
                             new_anyof.append({**variant, "enum": new_domains})
                         else:
-                            new_anyof.append({k: v for k, v in variant.items() if k != "enum"})
+                            new_anyof.append(variant)
                     elif variant.get("type") == "array" and isinstance(variant.get("items"), dict) and "enum" in variant["items"]:
                         new_domains = [d for d in variant["items"]["enum"] if d in domains]
                         if new_domains:
                             new_anyof.append({**variant, "items": {**variant["items"], "enum": new_domains}})
                         else:
-                            new_anyof.append({**variant, "items": {k: v for k, v in variant["items"].items() if k != "enum"}})
+                            new_anyof.append(variant)
                     else:
                         new_anyof.append(variant)
                 props["domain"] = {**dom, "anyOf": new_anyof}

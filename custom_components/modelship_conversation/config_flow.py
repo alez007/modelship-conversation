@@ -51,6 +51,7 @@ from .const import (
     CONF_IMAGE_MODEL,
     CONF_MAX_TOKENS,
     CONF_NARROW_TOOLS,
+    CONF_STATELESS,
     CONF_REASONING_EFFORT,
     CONF_REASONING_SUMMARY,
     CONF_STOP_AFTER_ACTION,
@@ -84,6 +85,7 @@ from .const import (
     RECOMMENDED_IMAGE_MODEL,
     RECOMMENDED_MAX_TOKENS,
     RECOMMENDED_NARROW_TOOLS,
+    RECOMMENDED_STATELESS,
     RECOMMENDED_REASONING_EFFORT,
     RECOMMENDED_STOP_AFTER_ACTION,
     RECOMMENDED_REASONING_SUMMARY,
@@ -423,6 +425,10 @@ class OpenAISubentryFlowHandler(ConfigSubentryFlow):
                 vol.Optional(
                     CONF_STOP_AFTER_ACTION,
                     default=RECOMMENDED_STOP_AFTER_ACTION,
+                ): bool,
+                vol.Optional(
+                    CONF_STATELESS,
+                    default=RECOMMENDED_STATELESS,
                 ): bool,
             }
         )
