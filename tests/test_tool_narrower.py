@@ -36,9 +36,10 @@ def _names(kept):
 
 
 def test_media_keeps_media_and_core_drops_noise():
+    # HassMediaPause is a domain action -> command -> GetLiveContext is dropped.
     kept = _select(_TOOLS, {"HassMediaPause"}, {"media_player"}, _DMAP, 99, {}, {})
     assert set(_names(kept)) == {
-        "HassTurnOn", "HassTurnOff", "GetLiveContext",
+        "HassTurnOn", "HassTurnOff",
         "HassMediaPause", "HassMediaNext", "HassMediaUnpause", "HassSetVolume",
     }
 
@@ -48,12 +49,18 @@ def test_domain_only_signal_keeps_core_plus_domain_tool():
     assert set(_names(kept)) == {"HassTurnOn", "HassTurnOff", "GetLiveContext", "HassLightSet"}
 
 
-def test_generic_match_narrows_to_core():
-    # "turn on my sony tv": hassil matches the generic HassTurnOn (no domain slot). That IS a
-    # signal -> narrow to core only. No media tools are offered, so the model cannot mis-pick
-    # HassMediaUnpause for a power command.
+def test_generic_command_narrows_to_action_verbs_only():
+    # A generic on/off match is a command: only the action verbs are offered, and the query
+    # tool (GetLiveContext) is dropped so the model cannot divert to a state lookup.
     kept = _select(_TOOLS, {"HassTurnOn"}, set(), _DMAP, 6, {}, {})
-    assert _names(kept) == ["HassTurnOn", "HassTurnOff", "GetLiveContext"]
+    assert _names(kept) == ["HassTurnOn", "HassTurnOff"]
+
+
+def test_status_query_keeps_query_tool():
+    # A Get* domain intent is a query, not a command -> GetLiveContext stays core.
+    kept = _names(_select(_TOOLS, {"HassGetWeather"}, {"weather"}, _DMAP, 6, {}, {}))
+    assert "GetLiveContext" in kept
+    assert "HassGetWeather" in kept
 
 
 def test_no_signal_strips_all_action_tools():
@@ -70,9 +77,10 @@ def test_cap_keeps_core_first_then_matched():
     kept = _select(tools, {"X0"}, {"media_player"}, dmap, 4, {}, {})
     assert len(kept) == 4
     names = _names(kept)
-    # all 3 core tools survive the cap (never evicted) and come first
-    assert names[:3] == ["HassTurnOn", "HassTurnOff", "GetLiveContext"]
-    assert "X0" in names  # matched intent takes the one remaining slot
+    # X0 is a command (domain action) so GetLiveContext is dropped; the action verbs survive
+    # the cap (never evicted) and come first.
+    assert names[:2] == ["HassTurnOn", "HassTurnOff"]
+    assert "X0" in names  # matched intent takes a remaining slot
 
 
 def test_cap_never_evicts_core_even_when_full():

@@ -20,9 +20,9 @@ case we'd rather not act on.
 
 Kept tools depend on the signal:
 
-* **hassil matched something** -> an always-on core (``HassTurnOn``/``HassTurnOff``/
-  ``GetLiveContext``) + tools whose intent matched or whose target domain was detected,
-  capped at ``max_tools``.
+* **hassil matched something** -> a core (``HassTurnOn``/``HassTurnOff``, plus
+  ``GetLiveContext`` only when the utterance is a query rather than a control command) +
+  tools whose intent matched or whose target domain was detected, capped at ``max_tools``.
 * **hassil matched nothing** -> strip *all* action tools. A blank match means the utterance
   isn't a recognized device command (a greeting, chit-chat, a general question), and handing
   a tiny model the full catalog on "hi" just invites a hallucinated call. We fail **closed**,
@@ -45,9 +45,9 @@ from homeassistant.core import HomeAssistant
 from .const import LOGGER
 from .tool_enums import _collect_exposed, _intent_domain_map
 
-# Tools kept whenever there is *any* hassil signal: the generic on/off verbs and the
-# live-state query tool. Status questions route to GetLiveContext, so keeping it core is the
-# whole "query rule". (On a *blank* match these are dropped too — see module docstring.)
+# Core kept on any hassil signal. GetLiveContext is core only for non-command utterances;
+# on a control command it is dropped so it can't compete with the action verbs (see
+# ``_select``). On a *blank* match all of these are dropped too — see module docstring.
 _CORE_TOOLS = frozenset({"HassTurnOn", "HassTurnOff", "GetLiveContext"})
 
 # Built once per language (the intent templates are language-global, not hass-specific).
@@ -247,6 +247,15 @@ def _select(
     With *no* signal (``matched_intents`` and ``domains`` both empty): only the non-function
     passthrough survives — all action tools are stripped (fail closed; see module docstring).
     """
+    # Drop the live-state query tool when the utterance is a control command, so it can't
+    # compete with the action verbs. A command = generic on/off, or any domain *action*
+    # intent (``Get*`` intents are queries and keep their own tool). Generic status intents
+    # (``HassGetState``) are absent from ``domain_map`` and leave GetLiveContext in place.
+    is_command = bool(matched_intents & {"HassTurnOn", "HassTurnOff"}) or any(
+        i in domain_map and "Get" not in i for i in matched_intents
+    )
+    core_tools = {"HassTurnOn", "HassTurnOff"} if is_command else _CORE_TOOLS
+
     passthrough: list[dict[str, Any]] = []  # non-function tools (web_search, ...) — never dropped
     core: list[dict[str, Any]] = []
     matched: list[dict[str, Any]] = []
@@ -263,7 +272,7 @@ def _select(
         else:
             name = tool.get("name")
 
-        if name in _CORE_TOOLS:
+        if name in core_tools:
             core.append(tool)
         elif name in matched_intents:
             matched.append(tool)
