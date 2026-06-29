@@ -78,6 +78,7 @@ from .const import (
     CONF_REASONING_EFFORT,
     CONF_REASONING_SUMMARY,
     CONF_SERVICE_TIER,
+    CONF_STATELESS,
     CONF_STOP_AFTER_ACTION,
     CONF_STORE_RESPONSES,
     CONF_TEMPERATURE,
@@ -101,6 +102,7 @@ from .const import (
     RECOMMENDED_REASONING_EFFORT,
     RECOMMENDED_REASONING_SUMMARY,
     RECOMMENDED_SERVICE_TIER,
+    RECOMMENDED_STATELESS,
     RECOMMENDED_STOP_AFTER_ACTION,
     RECOMMENDED_STORE_RESPONSES,
     RECOMMENDED_STT_MODEL,
@@ -555,6 +557,14 @@ class OpenAIBaseLLMEntity(Entity):
         options = self.subentry.data
 
         messages = _convert_content_to_param(chat_log.content)
+
+        # modelship: stateless mode — send only this utterance (+ the developer prompt and
+        # the current turn's tool scaffolding), so a tiny model can't copy its own earlier
+        # mistakes out of the replayed history. Slice before model_args so input == messages.
+        if options.get(CONF_STATELESS, RECOMMENDED_STATELESS):
+            from .history import drop_history
+
+            messages = drop_history(messages)
 
         model_args = ResponseCreateParamsStreaming(
             model=options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL),

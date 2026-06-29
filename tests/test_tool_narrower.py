@@ -175,7 +175,13 @@ def test_narrow_generic_enums_name_area_domain():
     assert domain_prop["anyOf"][1]["items"]["enum"] == ["light"]
 
 
-def test_narrow_generic_enums_removes_enum_key_if_none_match():
+def test_narrow_generic_enums_keeps_full_enum_if_none_match():
+    # No-drop guard: when the detected domain filters an enum down to nothing, keep the
+    # FULL enum rather than stripping it. A bare slot lets the model hallucinate any string,
+    # which is strictly worse than an over-broad but still-valid enum. This is the second
+    # line of defense behind narrow_tools' exposed-domain intersection: even if a false
+    # domain leaks through (the "turn off the tv" -> scene/script regression), the sony-tv
+    # enum survives instead of vanishing.
     tools = [
         {
             "type": "function",
@@ -201,19 +207,49 @@ def test_narrow_generic_enums_removes_enum_key_if_none_match():
     ]
     name_domains = {"sony tv": {"media_player"}}
     area_domains = {"Small Bedroom": {"light"}}
-    
-    # domains is {"vacuum"} — nothing matches
+
+    # domains is {"vacuum"} — nothing matches, so every enum is kept intact.
     kept = _select(tools, {"HassTurnOn"}, {"vacuum"}, {}, 6, name_domains, area_domains)
     properties = kept[0]["parameters"]["properties"]
-    
-    # enum keys should be removed entirely
-    assert "enum" not in properties["name"]
-    assert "enum" not in properties["area"]
-    
+
+    assert properties["name"]["enum"] == ["sony tv"]
+    assert properties["area"]["enum"] == ["Small Bedroom"]
+
+    # domain array is still broadened to anyOf (step 1), but both variants keep their enum.
     domain_prop = properties["domain"]
     assert "anyOf" in domain_prop
-    assert "enum" not in domain_prop["anyOf"][0]
-    assert "enum" not in domain_prop["anyOf"][1]["items"]
+    assert domain_prop["anyOf"][0]["enum"] == ["media_player"]
+    assert domain_prop["anyOf"][1]["items"]["enum"] == ["media_player"]
+
+
+def test_false_domain_does_not_blank_enums_regression():
+    # Regression: hassil false-matched "turn off the tv" to scene/script turn-off templates
+    # and reported domains={scene, script}, none of which the house exposes. The old code
+    # then filtered every generic enum to empty and DELETED it, so the tools reached the
+    # model bare and it free-typed a wrong call. narrow_tools now intersects detected
+    # domains with exposed domains (dropping scene/script -> empty -> no narrowing), and
+    # _select keeps full enums on an empty filter. Both mean the sony-tv enum must survive.
+    tools = [
+        {
+            "type": "function",
+            "name": "HassTurnOff",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "enum": ["sony tv", "Livingroom Lamps"]},
+                    "area": {"type": "string", "enum": ["Living Room"]},
+                },
+            },
+        }
+    ]
+    name_domains = {"sony tv": {"media_player"}, "Livingroom Lamps": {"input_boolean"}}
+    area_domains = {"Living Room": {"media_player", "input_boolean"}}
+
+    # A bogus domain leaking into _select must not strip the enums.
+    kept = _select(tools, {"HassTurnOff"}, {"scene", "script"}, {}, 6, name_domains, area_domains)
+    props = kept[0]["parameters"]["properties"]
+    assert set(props["name"]["enum"]) == {"sony tv", "Livingroom Lamps"}
+    assert props["area"]["enum"] == ["Living Room"]
 
 
 def test_nested_openai_structure_enum_narrowing_and_broadening():

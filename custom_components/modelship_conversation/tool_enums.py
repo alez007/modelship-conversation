@@ -134,6 +134,12 @@ def _apply_to_tool(
                     new_anyof.append({**variant, "enum": domains})
                 elif variant.get("type") == "array" and isinstance(variant.get("items"), dict):
                     new_anyof.append({**variant, "items": {**variant["items"], "enum": domains}})
+                elif "type" not in variant:
+                    # HA renders the scalar leg of ``vol.Any(str, [str])`` as an untyped
+                    # ``{}`` (GetLiveContext's ``domain``): the type info is lost so it
+                    # accepts anything, and the branches above skip it -> the single-domain
+                    # form stays unconstrained. Treat it as the string slot and enum it.
+                    new_anyof.append({**variant, "type": "string", "enum": domains})
                 else:
                     new_anyof.append(variant)
             props["domain"] = {**dom, "anyOf": new_anyof}
