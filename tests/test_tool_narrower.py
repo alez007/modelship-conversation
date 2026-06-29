@@ -63,6 +63,13 @@ def test_status_query_keeps_query_tool():
     assert "HassGetWeather" in kept
 
 
+def test_query_intent_vetoes_spurious_turn_match():
+    # Lenient hassil returns HassGetState + a spurious HassTurnOn for a question. The query
+    # intent vetoes the command classification so GetLiveContext survives.
+    kept = _names(_select(_TOOLS, {"HassGetState", "HassTurnOn"}, set(), _DMAP, 6, {}, {}))
+    assert "GetLiveContext" in kept
+
+
 def test_no_signal_strips_all_action_tools():
     # hassil matched nothing (greeting / chit-chat / broken hassil) -> fail closed: every
     # action tool is stripped so a tiny model can't hallucinate a call on "hi".

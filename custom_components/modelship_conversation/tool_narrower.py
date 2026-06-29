@@ -249,10 +249,13 @@ def _select(
     """
     # Drop the live-state query tool when the utterance is a control command, so it can't
     # compete with the action verbs. A command = generic on/off, or any domain *action*
-    # intent (``Get*`` intents are queries and keep their own tool). Generic status intents
-    # (``HassGetState``) are absent from ``domain_map`` and leave GetLiveContext in place.
-    is_command = bool(matched_intents & {"HassTurnOn", "HassTurnOff"}) or any(
-        i in domain_map and "Get" not in i for i in matched_intents
+    # intent. A co-matched query intent (``Get*`` — ``HassGetState``, ``HassGetWeather``)
+    # vetoes this: the lenient hassil pass routinely returns a spurious turn intent next to
+    # the real query, and a question must never lose GetLiveContext, its only answer path.
+    has_query = any("Get" in i for i in matched_intents)
+    is_command = not has_query and (
+        bool(matched_intents & {"HassTurnOn", "HassTurnOff"})
+        or any(i in domain_map and "Get" not in i for i in matched_intents)
     )
     core_tools = {"HassTurnOn", "HassTurnOff"} if is_command else _CORE_TOOLS
 
