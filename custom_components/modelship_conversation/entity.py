@@ -710,15 +710,25 @@ class OpenAIBaseLLMEntity(Entity):
         # cleared after the first call below, or the synthesis turn re-forces the call and
         # loops to max_iterations. Skipped if image generation already claimed tool_choice.
         forced_first_turn = False
-        if (
-            force_tool
-            and "tool_choice" not in model_args
-            and any(isinstance(t, dict) and t.get("name") == force_tool for t in tools)
-        ):
-            model_args["tool_choice"] = ToolChoiceFunctionParam(
-                type="function", name=force_tool
+        if force_tool and "tool_choice" not in model_args:
+            forced = next(
+                (t for t in tools if isinstance(t, dict) and t.get("name") == force_tool),
+                None,
             )
-            forced_first_turn = True
+            if forced is not None:
+                model_args["tool_choice"] = ToolChoiceFunctionParam(
+                    type="function", name=force_tool
+                )
+                forced_first_turn = True
+                # Strip the filter slots from a forced GetLiveContext: a small model fills
+                # name/area/domain with arbitrary enum values unrelated to the question, so
+                # the empty call returns the full live context that holds the answer.
+                if force_tool == "GetLiveContext":
+                    forced["parameters"] = {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    }
 
         last_content = chat_log.content[-1]
 
