@@ -4,11 +4,17 @@ Run in a Home Assistant test env (the module imports ``homeassistant`` at load).
 function under test (``_select``) is pure — it takes plain dicts/sets, no fixtures required.
 """
 
-from custom_components.modelship_conversation.tool_narrower import _select
+from custom_components.modelship_conversation.tool_narrower import _select, _tool_name
 
 
 def _f(name: str) -> dict:
     return {"type": "function", "name": name, "parameters": {}}
+
+
+def _forces(kept) -> bool:
+    # Mirrors narrow_tools: GetLiveContext survives narrowing only on the query path, so its
+    # presence in the kept set is the first-turn tool_choice force condition.
+    return any(_tool_name(t) == "GetLiveContext" for t in kept)
 
 
 _TOOLS = [
@@ -68,6 +74,16 @@ def test_query_intent_vetoes_spurious_turn_match():
     # intent vetoes the command classification so GetLiveContext survives.
     kept = _names(_select(_TOOLS, {"HassGetState", "HassTurnOn"}, set(), _DMAP, 6, {}, {}))
     assert "GetLiveContext" in kept
+
+
+def test_force_live_context_on_queries_only():
+    # Query paths force GetLiveContext on the first turn; commands and no-signal never do.
+    assert _forces(_select(_TOOLS, {"HassGetWeather"}, {"weather"}, _DMAP, 6, {}, {}))
+    assert _forces(_select(_TOOLS, set(), {"light"}, _DMAP, 6, {}, {}))
+    assert _forces(_select(_TOOLS, {"HassGetState", "HassTurnOn"}, set(), _DMAP, 6, {}, {}))
+    assert not _forces(_select(_TOOLS, {"HassTurnOn"}, set(), _DMAP, 6, {}, {}))
+    assert not _forces(_select(_TOOLS, {"HassMediaPause"}, {"media_player"}, _DMAP, 6, {}, {}))
+    assert not _forces(_select(_TOOLS, set(), set(), _DMAP, 6, {}, {}))
 
 
 def test_no_signal_strips_all_action_tools():

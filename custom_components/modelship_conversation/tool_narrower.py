@@ -50,6 +50,17 @@ from .tool_enums import _collect_exposed, _intent_domain_map
 # ``_select``). On a *blank* match all of these are dropped too — see module docstring.
 _CORE_TOOLS = frozenset({"HassTurnOn", "HassTurnOff", "GetLiveContext"})
 
+
+def _tool_name(tool: Any) -> str | None:
+    """Tool name from either the flat (Responses) or nested (OpenAI) shape."""
+    if not isinstance(tool, dict):
+        return None
+    fn = tool.get("function")
+    if isinstance(fn, dict):
+        return fn.get("name")
+    return tool.get("name")
+
+
 # Built once per language (the intent templates are language-global, not hass-specific).
 # ``None`` is cached too so a failed/unavailable load isn't retried every request.
 _INTENTS_CACHE: dict[str, Any] = {}
@@ -79,16 +90,22 @@ async def narrow_tools(
     tools: list[dict[str, Any]],
     user_text: str,
     max_tools: int = 6,
-) -> None:
+) -> str | None:
     """Trim ``tools`` in place to what ``user_text`` asks for.
 
     ``tools`` must contain only the Assist LLM API tools (call after
     :func:`.tool_enums.inject_assist_enums`, before web_search / code_interpreter / image
     tools are appended). A blank hassil match strips all action tools (fail closed); only an
     error building the exposed maps / intent registry leaves the list untouched.
+
+    Returns the name of a tool to force on the first model turn (``GetLiveContext`` when the
+    utterance is a live-state query), or ``None``. GetLiveContext survives narrowing only on
+    the non-command query path, so its presence in the kept set *is* the force condition; the
+    caller pins it with ``tool_choice`` so a small model fetches real state instead of
+    answering from nothing.
     """
     if not user_text or not tools:
-        return
+        return None
     try:
         name_domains, area_domains = _collect_exposed(hass)
         domain_map = _intent_domain_map(hass)
@@ -107,21 +124,23 @@ async def narrow_tools(
         domains &= exposed_domains
     except Exception:  # only a registry/exposed-map error fails open; hassil whiffs do not
         LOGGER.debug("narrow_tools: detection failed, keeping full list", exc_info=True)
-        return
+        return None
 
     kept = _select(tools, matched_intents, domains, domain_map, max_tools, name_domains, area_domains)
-    if len(kept) >= len(tools):
-        return
-    LOGGER.debug(
-        "narrow_tools: %r -> intents=%s domains=%s; %d -> %d tools %s",
-        user_text,
-        sorted(matched_intents),
-        sorted(domains),
-        len(tools),
-        len(kept),
-        [t.get("name") for t in kept],
-    )
-    tools[:] = kept
+    force_tool = "GetLiveContext" if any(_tool_name(t) == "GetLiveContext" for t in kept) else None
+    if len(kept) < len(tools):
+        LOGGER.debug(
+            "narrow_tools: %r -> intents=%s domains=%s; %d -> %d tools %s force=%s",
+            user_text,
+            sorted(matched_intents),
+            sorted(domains),
+            len(tools),
+            len(kept),
+            [_tool_name(t) for t in kept],
+            force_tool,
+        )
+        tools[:] = kept
+    return force_tool
 
 
 async def _detect(

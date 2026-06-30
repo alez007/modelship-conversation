@@ -37,6 +37,7 @@ from openai.types.responses import (
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
+    ToolChoiceFunctionParam,
     ToolChoiceTypesParam,
     ToolParam,
     WebSearchToolParam,
@@ -611,6 +612,7 @@ class OpenAIBaseLLMEntity(Entity):
         ):
             model_args["prompt_cache_retention"] = "24h"
 
+        force_tool: str | None = None
         tools: list[ToolParam] = []
         if chat_log.llm_api:
             tools = [
@@ -623,11 +625,12 @@ class OpenAIBaseLLMEntity(Entity):
             inject_assist_enums(self.hass, tools)
 
             # modelship: trim the tool list to the utterance's likely domains for small local
-            # models (opt-in; would hurt large models that handle the full catalog).
+            # models (opt-in; would hurt large models that handle the full catalog). Returns
+            # a tool to force on the first turn for live-state queries (see below).
             if options.get(CONF_NARROW_TOOLS, RECOMMENDED_NARROW_TOOLS):
                 from .tool_narrower import narrow_tools
 
-                await narrow_tools(
+                force_tool = await narrow_tools(
                     self.hass,
                     tools,
                     _latest_user_text(chat_log),
@@ -701,6 +704,21 @@ class OpenAIBaseLLMEntity(Entity):
 
         if tools:
             model_args["tools"] = tools
+
+        # modelship: on a live-state query the narrower returns GetLiveContext to pin, so a
+        # small model fetches real state instead of answering from nothing. First turn only —
+        # cleared after the first call below, or the synthesis turn re-forces the call and
+        # loops to max_iterations. Skipped if image generation already claimed tool_choice.
+        forced_first_turn = False
+        if (
+            force_tool
+            and "tool_choice" not in model_args
+            and any(isinstance(t, dict) and t.get("name") == force_tool for t in tools)
+        ):
+            model_args["tool_choice"] = ToolChoiceFunctionParam(
+                type="function", name=force_tool
+            )
+            forced_first_turn = True
 
         last_content = chat_log.content[-1]
 
@@ -780,6 +798,12 @@ class OpenAIBaseLLMEntity(Entity):
 
                 LOGGER.error("Error talking to OpenAI: %s", err)
                 raise HomeAssistantError("Error talking to OpenAI") from err
+
+            # modelship: drop the one-shot forced tool_choice after the first call so the
+            # synthesis turn (and any further rounds) sample freely.
+            if forced_first_turn:
+                model_args.pop("tool_choice", None)
+                forced_first_turn = False
 
             if not chat_log.unresponded_tool_results:
                 break
