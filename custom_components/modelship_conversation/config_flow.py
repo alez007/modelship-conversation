@@ -50,11 +50,8 @@ from .const import (
     CONF_CODE_INTERPRETER,
     CONF_IMAGE_MODEL,
     CONF_MAX_TOKENS,
-    CONF_NARROW_TOOLS,
-    CONF_STATELESS,
     CONF_REASONING_EFFORT,
     CONF_REASONING_SUMMARY,
-    CONF_STOP_AFTER_ACTION,
     CONF_RECOMMENDED,
     CONF_SERVICE_TIER,
     CONF_STORE_RESPONSES,
@@ -84,10 +81,7 @@ from .const import (
     RECOMMENDED_CONVERSATION_OPTIONS,
     RECOMMENDED_IMAGE_MODEL,
     RECOMMENDED_MAX_TOKENS,
-    RECOMMENDED_NARROW_TOOLS,
-    RECOMMENDED_STATELESS,
     RECOMMENDED_REASONING_EFFORT,
-    RECOMMENDED_STOP_AFTER_ACTION,
     RECOMMENDED_REASONING_SUMMARY,
     RECOMMENDED_SERVICE_TIER,
     RECOMMENDED_STORE_RESPONSES,
@@ -109,6 +103,7 @@ from .const import (
     UNSUPPORTED_PRIORITY_SERVICE_TIERS_MODELS,
     UNSUPPORTED_WEB_SEARCH_MODELS,
 )
+from . import modelship  # modelship: all fork-specific behaviour lives here
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -415,23 +410,7 @@ class OpenAISubentryFlowHandler(ConfigSubentryFlow):
         elif CONF_CODE_INTERPRETER in options:
             options.pop(CONF_CODE_INTERPRETER)
 
-        # modelship: opt-in tool narrowing for small local models.
-        step_schema.update(
-            {
-                vol.Optional(
-                    CONF_NARROW_TOOLS,
-                    default=RECOMMENDED_NARROW_TOOLS,
-                ): bool,
-                vol.Optional(
-                    CONF_STOP_AFTER_ACTION,
-                    default=RECOMMENDED_STOP_AFTER_ACTION,
-                ): bool,
-                vol.Optional(
-                    CONF_STATELESS,
-                    default=RECOMMENDED_STATELESS,
-                ): bool,
-            }
-        )
+        modelship.add_options_schema(step_schema)  # modelship: small-model toggles
 
         if reasoning_options := self._get_reasoning_options(model):
             step_schema.update(

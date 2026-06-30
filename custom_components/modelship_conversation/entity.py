@@ -37,7 +37,6 @@ from openai.types.responses import (
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
-    ToolChoiceFunctionParam,
     ToolChoiceTypesParam,
     ToolParam,
     WebSearchToolParam,
@@ -74,13 +73,9 @@ from .const import (
     CONF_CODE_INTERPRETER,
     CONF_IMAGE_MODEL,
     CONF_MAX_TOKENS,
-    CONF_NARROW_MAX_TOOLS,
-    CONF_NARROW_TOOLS,
     CONF_REASONING_EFFORT,
     CONF_REASONING_SUMMARY,
     CONF_SERVICE_TIER,
-    CONF_STATELESS,
-    CONF_STOP_AFTER_ACTION,
     CONF_STORE_RESPONSES,
     CONF_TEMPERATURE,
     CONF_TOP_P,
@@ -98,13 +93,9 @@ from .const import (
     RECOMMENDED_CHAT_MODEL,
     RECOMMENDED_IMAGE_MODEL,
     RECOMMENDED_MAX_TOKENS,
-    RECOMMENDED_NARROW_MAX_TOOLS,
-    RECOMMENDED_NARROW_TOOLS,
     RECOMMENDED_REASONING_EFFORT,
     RECOMMENDED_REASONING_SUMMARY,
     RECOMMENDED_SERVICE_TIER,
-    RECOMMENDED_STATELESS,
-    RECOMMENDED_STOP_AFTER_ACTION,
     RECOMMENDED_STORE_RESPONSES,
     RECOMMENDED_STT_MODEL,
     RECOMMENDED_TEMPERATURE,
@@ -114,6 +105,7 @@ from .const import (
     RECOMMENDED_WEB_SEARCH_INLINE_CITATIONS,
     UNSUPPORTED_EXTENDED_CACHE_RETENTION_MODELS,
 )
+from . import modelship  # modelship: all fork-specific behaviour lives here
 
 if TYPE_CHECKING:
     from . import OpenAIConfigEntry
@@ -180,46 +172,6 @@ def _format_tool(
         description=tool.description,
         strict=False,
     )
-
-
-def _latest_user_text(chat_log: conversation.ChatLog) -> str:
-    """Return the most recent user-turn text from the chat log (for tool narrowing)."""
-    for content in reversed(chat_log.content):
-        if getattr(content, "role", None) == "user":
-            text = getattr(content, "content", None)
-            if isinstance(text, str) and text:
-                return text
-    return ""
-
-
-def _completed_action_speech(
-    contents: Iterable[conversation.Content],
-) -> str | None:
-    """If a control intent just completed successfully, return its confirmation speech.
-
-    Small local models keep emitting tool calls after a successful action instead of
-    ending the turn with text — burning iterations and polluting the next turn's
-    history (see the FunctionGemma findings). When ``stop_after_action`` is on, the
-    caller uses this to end the turn as soon as an action lands. Returns ``None`` for
-    query results (e.g. ``GetLiveContext``) so multi-step "check then act" flows still
-    round-trip back to the model.
-    """
-    for content in contents:
-        if not isinstance(content, conversation.ToolResultContent):
-            continue
-        result = content.tool_result
-        if not isinstance(result, dict) or result.get("response_type") != "action_done":
-            continue
-        data = result.get("data") or {}
-        if not data.get("success") or data.get("failed"):
-            continue
-        speech = result.get("speech")
-        if isinstance(speech, dict):
-            plain = speech.get("plain")
-            if isinstance(plain, dict) and plain.get("speech"):
-                return str(plain["speech"])
-        return "Done."
-    return None
 
 
 def _convert_content_to_param(
@@ -559,13 +511,7 @@ class OpenAIBaseLLMEntity(Entity):
 
         messages = _convert_content_to_param(chat_log.content)
 
-        # modelship: stateless mode — send only this utterance (+ the developer prompt and
-        # the current turn's tool scaffolding), so a tiny model can't copy its own earlier
-        # mistakes out of the replayed history. Slice before model_args so input == messages.
-        if options.get(CONF_STATELESS, RECOMMENDED_STATELESS):
-            from .history import drop_history
-
-            messages = drop_history(messages)
+        messages = modelship.apply_stateless(options, messages)  # modelship
 
         model_args = ResponseCreateParamsStreaming(
             model=options.get(CONF_CHAT_MODEL, RECOMMENDED_CHAT_MODEL),
@@ -612,30 +558,16 @@ class OpenAIBaseLLMEntity(Entity):
         ):
             model_args["prompt_cache_retention"] = "24h"
 
-        force_tool: str | None = None
+        force_tool: str | None = None  # modelship
         tools: list[ToolParam] = []
         if chat_log.llm_api:
             tools = [
                 _format_tool(tool, chat_log.llm_api.custom_serializer)
                 for tool in chat_log.llm_api.tools
             ]
-            # modelship: constrain device-tool name/area to exact exposed values (variant B)
-            from .tool_enums import inject_assist_enums
-
-            inject_assist_enums(self.hass, tools)
-
-            # modelship: trim the tool list to the utterance's likely domains for small local
-            # models (opt-in; would hurt large models that handle the full catalog). Returns
-            # a tool to force on the first turn for live-state queries (see below).
-            if options.get(CONF_NARROW_TOOLS, RECOMMENDED_NARROW_TOOLS):
-                from .tool_narrower import narrow_tools
-
-                force_tool = await narrow_tools(
-                    self.hass,
-                    tools,
-                    _latest_user_text(chat_log),
-                    options.get(CONF_NARROW_MAX_TOOLS, RECOMMENDED_NARROW_MAX_TOOLS),
-                )
+            force_tool = await modelship.prepare_tools(  # modelship
+                self.hass, options, tools, chat_log
+            )
 
         remove_citations = False
         if options.get(CONF_WEB_SEARCH):
@@ -705,30 +637,8 @@ class OpenAIBaseLLMEntity(Entity):
         if tools:
             model_args["tools"] = tools
 
-        # modelship: on a live-state query the narrower returns GetLiveContext to pin, so a
-        # small model fetches real state instead of answering from nothing. First turn only —
-        # cleared after the first call below, or the synthesis turn re-forces the call and
-        # loops to max_iterations. Skipped if image generation already claimed tool_choice.
-        forced_first_turn = False
-        if force_tool and "tool_choice" not in model_args:
-            forced = next(
-                (t for t in tools if isinstance(t, dict) and t.get("name") == force_tool),
-                None,
-            )
-            if forced is not None:
-                model_args["tool_choice"] = ToolChoiceFunctionParam(
-                    type="function", name=force_tool
-                )
-                forced_first_turn = True
-                # Strip the filter slots from a forced GetLiveContext: a small model fills
-                # name/area/domain with arbitrary enum values unrelated to the question, so
-                # the empty call returns the full live context that holds the answer.
-                if force_tool == "GetLiveContext":
-                    forced["parameters"] = {
-                        "type": "object",
-                        "properties": {},
-                        "additionalProperties": False,
-                    }
+        # modelship: pin the narrower's chosen tool for the first turn (live-state queries).
+        forced_first_turn = modelship.force_first_tool(force_tool, tools, model_args)
 
         last_content = chat_log.content[-1]
 
@@ -809,29 +719,19 @@ class OpenAIBaseLLMEntity(Entity):
                 LOGGER.error("Error talking to OpenAI: %s", err)
                 raise HomeAssistantError("Error talking to OpenAI") from err
 
-            # modelship: drop the one-shot forced tool_choice after the first call so the
-            # synthesis turn (and any further rounds) sample freely.
-            if forced_first_turn:
-                model_args.pop("tool_choice", None)
-                forced_first_turn = False
+            # modelship: release the one-shot forced tool_choice after the first call.
+            forced_first_turn = modelship.release_forced_tool(
+                forced_first_turn, model_args
+            )
 
             if not chat_log.unresponded_tool_results:
                 break
 
-            # modelship: with a small local model, stop as soon as a control intent
-            # completes instead of round-tripping the success back (the model would
-            # just keep emitting tool calls). End the turn with the intent's own
-            # confirmation so HA has a final assistant turn to speak. Opt-in; off by
-            # default so capable models can still chain multi-action requests.
-            if options.get(CONF_STOP_AFTER_ACTION, RECOMMENDED_STOP_AFTER_ACTION):
-                speech = _completed_action_speech(new_content)
-                if speech is not None:
-                    chat_log.async_add_assistant_content_without_tools(
-                        conversation.AssistantContent(
-                            agent_id=self.entity_id, content=speech
-                        )
-                    )
-                    break
+            # modelship: stop as soon as a control intent succeeds (small models loop).
+            if modelship.stop_after_action(
+                options, new_content, chat_log, self.entity_id
+            ):
+                break
 
 
 async def async_prepare_files_for_prompt(
